@@ -143,8 +143,8 @@ function buildTimerEvents(track, registros) {
   track.forEach((p, i) => { if (p.lat&&p.lng) evts.push({ type:'track', data:p, idx:i, total:track.length }); });
   registros.forEach(r => { if (r.lat&&r.lng) evts.push({ type:'reg', data:r }); });
   evts.sort((a,b) => {
-    const ta = a.type==='track' ? (a.data.ts||'') : (a.data.timestamp||a.data.fecha+'T'+a.data.hora||'');
-    const tb = b.type==='track' ? (b.data.ts||'') : (b.data.timestamp||b.data.fecha+'T'+b.data.hora||'');
+    const ta = a.type==='track' ? (a.data.ts||'') : (a.data.timestamp||fechaToISO(a.data.fecha)+'T'+(a.data.hora||''));
+    const tb = b.type==='track' ? (b.data.ts||'') : (b.data.timestamp||fechaToISO(b.data.fecha)+'T'+(b.data.hora||''));
     return ta.localeCompare(tb);
   });
   return evts;
@@ -253,8 +253,8 @@ function applyFilters() {
   const texto    = $('filter-texto').value.trim().toLowerCase();
   filteredSessions = allSessions.filter(s => {
     if (empresa  && s.empresa !== empresa)      return false;
-    if (fechaIni && s.fecha < fechaIni)         return false;
-    if (fechaFin && s.fecha > fechaFin)         return false;
+    if (fechaIni && fechaToISO(s.fecha) < fechaIni) return false;
+    if (fechaFin && fechaToISO(s.fecha) > fechaFin) return false;
     if (texto && ![(s.nombre||''),(s.finca||''),(s.lote||'')].join(' ').toLowerCase().includes(texto)) return false;
     return true;
   });
@@ -282,7 +282,7 @@ async function loadSessions() {
     map[r.sesion_id].enfs[r.enfermedad] = (map[r.sesion_id].enfs[r.enfermedad]||0)+1;
   });
 
-  allSessions       = Object.values(map).sort((a,b)=>(b.fecha+b.hora).localeCompare(a.fecha+a.hora));
+  allSessions       = Object.values(map).sort((a,b)=>(fechaToISO(b.fecha)+b.hora).localeCompare(fechaToISO(a.fecha)+a.hora));
   filteredSessions  = [...allSessions];
   renderSessionList();
   updateGlobalStats(filteredSessions);
@@ -369,12 +369,13 @@ $('del-ok').addEventListener('click', async () => {
   if (!_delSesion) return;
   hide('modal-delete');
   showLoading(true);
-  await Promise.all([
-    sb.from('censo_registros').delete().eq('sesion_id', _delSesion),
-    sb.from('censo_track').delete().eq('sesion_id', _delSesion)
-  ]);
+  const deletedId = _delSesion;
   _delSesion = null;
-  if (currentSession === _delSesion) {
+  await Promise.all([
+    sb.from('censo_registros').delete().eq('sesion_id', deletedId),
+    sb.from('censo_track').delete().eq('sesion_id', deletedId)
+  ]);
+  if (currentSession === deletedId) {
     currentSession = null; clearMapLayers(); timerStop();
     hide('detail-panel'); show('detail-empty');
   }
@@ -565,10 +566,18 @@ function renderResumen() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+function fechaToISO(f) {
+  if (!f) return '';
+  if (f.includes('-')) return f;
+  const [d, m, y] = f.split('/');
+  return `${y}-${(m||'').padStart(2,'0')}-${(d||'').padStart(2,'0')}`;
+}
+
 function formatFecha(f) {
   if (!f) return '—';
-  const [y,m,d] = f.split('-');
-  return `${d}/${m}/${y}`;
+  const iso = fechaToISO(f);
+  const [y, m, d] = iso.split('-');
+  return d && m && y ? `${d}/${m}/${y}` : f;
 }
 
 function showLoading(on) { on ? show('loading-overlay') : hide('loading-overlay'); }
