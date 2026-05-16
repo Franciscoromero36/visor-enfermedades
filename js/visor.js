@@ -1,11 +1,10 @@
 'use strict';
 /* ============================================================
-   Visor de Enfermedades v2 — Grupo Palmicultor
+   Visor de Enfermedades v3 — Grupo Palmicultor
    ============================================================ */
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-// ── Colores / íconos por enfermedad ───────────────────────────
 const ENF_COLOR = {
   'Anillo Rojo':      '#e63946',
   'PC':               '#f4a261',
@@ -19,25 +18,28 @@ const ENF_ICON = {
   'Pudrición Seca':'🟫','Pudrición Húmeda':'🔵','Otras':'⚫'
 };
 const ENFERMEDADES = Object.keys(ENF_COLOR);
+const SESSION_COLORS = ['#40916c','#e63946','#4361ee','#f4a261','#9b2226','#06d6a0','#fb8500','#8338ec','#023e8a','#8b5e3c'];
 
 // ── Estado ────────────────────────────────────────────────────
 let MAP = null;
-let mapLayers = { trackDots:[], markers:[], start:null, end:null };
-let currentSession = null;
-let currentRegistros = [];
-let currentTrack = [];
+let mapLayers = { polylines:[], markers:[], starts:[], ends:[] };
+let selectedSessions = new Set();
+let sessionData = {};       // sesion_id → { registros:[], track:[] }
 let allSessions = [];
 let filteredSessions = [];
 
 // Timer
 let timerInterval = null;
 let timerIdx = 0;
-let timerSpeed = 5; // puntos por tick
+let timerSpeed = 5;
 let timerPlaying = false;
-let timerEvents = []; // eventos ordenados por tiempo
+let timerEvents = [];
+let animPolylines = {};     // sid → L.polyline (en animación)
+let animPolyPoints = {};    // sid → [[lat,lng],...]
 
 // Resumen
 let resumenData = null;
+let resumenFilters = { empresa:'', finca:'', lote:'', fechaIni:'', fechaFin:'' };
 
 // ── DOM ───────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -101,31 +103,43 @@ function initMap() {
 }
 
 function clearMapLayers() {
-  mapLayers.trackDots.forEach(d => MAP.removeLayer(d)); mapLayers.trackDots = [];
+  mapLayers.polylines.forEach(l => MAP.removeLayer(l)); mapLayers.polylines = [];
   mapLayers.markers.forEach(m => MAP.removeLayer(m));   mapLayers.markers   = [];
-  if (mapLayers.start) { MAP.removeLayer(mapLayers.start); mapLayers.start = null; }
-  if (mapLayers.end)   { MAP.removeLayer(mapLayers.end);   mapLayers.end   = null; }
+  mapLayers.starts.forEach(m => MAP.removeLayer(m));    mapLayers.starts    = [];
+  mapLayers.ends.forEach(m => MAP.removeLayer(m));      mapLayers.ends      = [];
+  animPolylines = {};
+  animPolyPoints = {};
 }
 
-function addTrackPoint(p, idx, total) {
-  if (!p.lat || !p.lng) return null;
-  const isFirst = idx === 0;
-  const isLast  = idx === total - 1;
-  let dot;
-  if (isFirst) {
-    dot = L.circleMarker([p.lat, p.lng], {
-      radius:8, fillColor:'#1b4332', color:'#fff', weight:2, fillOpacity:1
-    }).bindPopup('Inicio de recorrido').addTo(MAP);
-  } else if (isLast) {
-    dot = L.circleMarker([p.lat, p.lng], {
-      radius:8, fillColor:'#e63946', color:'#fff', weight:2, fillOpacity:1
+function getSessionColor(sid) {
+  const ids = [...selectedSessions];
+  const idx = ids.indexOf(sid);
+  return SESSION_COLORS[idx >= 0 ? idx % SESSION_COLORS.length : 0];
+}
+
+function addTrackPolyline(track, color) {
+  const pts = track.filter(p => p.lat && p.lng).map(p => [p.lat, p.lng]);
+  if (pts.length < 2) return null;
+  const poly = L.polyline(pts, { color, weight:3, opacity:0.85 }).addTo(MAP);
+  mapLayers.polylines.push(poly);
+  return poly;
+}
+
+function addStartEndMarkers(track) {
+  const valid = track.filter(p => p.lat && p.lng);
+  if (!valid.length) return;
+  const first = valid[0];
+  const last  = valid[valid.length - 1];
+  const sm = L.circleMarker([first.lat, first.lng], {
+    radius:7, fillColor:'#1b4332', color:'#fff', weight:2, fillOpacity:1
+  }).bindPopup('Inicio de recorrido').addTo(MAP);
+  mapLayers.starts.push(sm);
+  if (valid.length > 1) {
+    const em = L.circleMarker([last.lat, last.lng], {
+      radius:7, fillColor:'#e63946', color:'#fff', weight:2, fillOpacity:1
     }).bindPopup('Fin de recorrido').addTo(MAP);
-  } else {
-    dot = L.circleMarker([p.lat, p.lng], {
-      radius:3, fillColor:'#40916c', color:'#40916c', weight:1, fillOpacity:0.7
-    }).bindPopup(`Track · ${p.ts||''} · ±${p.acc||'?'}m`).addTo(MAP);
+    mapLayers.ends.push(em);
   }
-  return dot;
 }
 
 function addDiseaseMarker(r) {
@@ -137,23 +151,49 @@ function addDiseaseMarker(r) {
     .addTo(MAP);
 }
 
+function drawAllOnMap() {
+  clearMapLayers();
+  const bounds = [];
+  [...selectedSessions].forEach(sid => {
+    const data = sessionData[sid];
+    if (!data) return;
+    const color = getSessionColor(sid);
+    addTrackPolyline(data.track, color);
+    addStartEndMarkers(data.track);
+    data.track.filter(p => p.lat && p.lng).forEach(p => bounds.push([p.lat, p.lng]));
+    data.registros.forEach(r => {
+      const m = addDiseaseMarker(r);
+      if (m && r.lat && r.lng) bounds.push([r.lat, r.lng]);
+    });
+  });
+  if (bounds.length) MAP.fitBounds(bounds, { padding:[30,30] });
+}
+
 // ── Timer / reproducción ──────────────────────────────────────
-function buildTimerEvents(track, registros) {
+function buildTimerEvents() {
   const evts = [];
-  track.forEach((p, i) => { if (p.lat&&p.lng) evts.push({ type:'track', data:p, idx:i, total:track.length }); });
-  registros.forEach(r => { if (r.lat&&r.lng) evts.push({ type:'reg', data:r }); });
+  [...selectedSessions].forEach(sid => {
+    const data = sessionData[sid];
+    if (!data) return;
+    data.track.forEach((p, i) => {
+      if (p.lat && p.lng) evts.push({ type:'track', data:p, idx:i, total:data.track.length, sid });
+    });
+    data.registros.forEach(r => {
+      if (r.lat && r.lng) evts.push({ type:'reg', data:r, sid });
+    });
+  });
   evts.sort((a,b) => {
-    const ta = a.type==='track' ? (a.data.ts||'') : (a.data.timestamp||fechaToISO(a.data.fecha)+'T'+(a.data.hora||''));
-    const tb = b.type==='track' ? (b.data.ts||'') : (b.data.timestamp||fechaToISO(b.data.fecha)+'T'+(b.data.hora||''));
+    const ta = a.type==='track' ? (a.data.ts||'') : (fechaToISO(a.data.fecha)+'T'+(a.data.hora||''));
+    const tb = b.type==='track' ? (b.data.ts||'') : (fechaToISO(b.data.fecha)+'T'+(b.data.hora||''));
     return ta.localeCompare(tb);
   });
   return evts;
 }
 
-function timerInit(track, registros) {
+function timerInit() {
   timerStop();
   clearMapLayers();
-  timerEvents = buildTimerEvents(track, registros);
+  timerEvents = buildTimerEvents();
   timerIdx    = 0;
   updateTimerUI();
 }
@@ -167,8 +207,14 @@ function timerPlay() {
     for (let i = 0; i < steps && timerIdx < timerEvents.length; i++, timerIdx++) {
       const ev = timerEvents[timerIdx];
       if (ev.type === 'track') {
-        const dot = addTrackPoint(ev.data, ev.idx, ev.total);
-        if (dot) mapLayers.trackDots.push(dot);
+        if (!animPolylines[ev.sid]) {
+          const color = getSessionColor(ev.sid);
+          animPolylines[ev.sid]  = L.polyline([], { color, weight:3, opacity:0.85 }).addTo(MAP);
+          mapLayers.polylines.push(animPolylines[ev.sid]);
+          animPolyPoints[ev.sid] = [];
+        }
+        animPolyPoints[ev.sid].push([ev.data.lat, ev.data.lng]);
+        animPolylines[ev.sid].setLatLngs(animPolyPoints[ev.sid]);
       } else {
         const m = addDiseaseMarker(ev.data);
         if (m) mapLayers.markers.push(m);
@@ -194,24 +240,16 @@ function timerStop() {
 function timerReset() {
   timerStop();
   clearMapLayers();
+  timerEvents = buildTimerEvents();
   timerIdx = 0;
   updateTimerUI();
 }
 
 function timerShowAll() {
   timerStop();
-  clearMapLayers();
-  timerIdx = timerEvents.length;
-  const bounds = [];
-  currentTrack.forEach((p, i) => {
-    const dot = addTrackPoint(p, i, currentTrack.length);
-    if (dot) { mapLayers.trackDots.push(dot); if (p.lat&&p.lng) bounds.push([p.lat,p.lng]); }
-  });
-  currentRegistros.forEach(r => {
-    const m = addDiseaseMarker(r);
-    if (m) { mapLayers.markers.push(m); if (r.lat&&r.lng) bounds.push([r.lat,r.lng]); }
-  });
-  if (bounds.length) MAP.fitBounds(bounds, { padding:[30,30] });
+  timerEvents = buildTimerEvents();
+  timerIdx    = timerEvents.length;
+  drawAllOnMap();
   updateTimerUI();
 }
 
@@ -233,7 +271,7 @@ function updateTimerUI() {
   }
 }
 
-// ── Filtros ───────────────────────────────────────────────────
+// ── Filtros panel izquierdo ───────────────────────────────────
 async function loadFilters() {
   const { data } = await sb.from('censo_registros').select('empresa').order('empresa');
   if (!data) return;
@@ -252,9 +290,9 @@ function applyFilters() {
   const fechaFin = $('filter-fecha-fin').value;
   const texto    = $('filter-texto').value.trim().toLowerCase();
   filteredSessions = allSessions.filter(s => {
-    if (empresa  && s.empresa !== empresa)      return false;
-    if (fechaIni && fechaToISO(s.fecha) < fechaIni) return false;
-    if (fechaFin && fechaToISO(s.fecha) > fechaFin) return false;
+    if (empresa  && s.empresa !== empresa)               return false;
+    if (fechaIni && fechaToISO(s.fecha) < fechaIni)      return false;
+    if (fechaFin && fechaToISO(s.fecha) > fechaFin)      return false;
     if (texto && ![(s.nombre||''),(s.finca||''),(s.lote||'')].join(' ').toLowerCase().includes(texto)) return false;
     return true;
   });
@@ -282,8 +320,8 @@ async function loadSessions() {
     map[r.sesion_id].enfs[r.enfermedad] = (map[r.sesion_id].enfs[r.enfermedad]||0)+1;
   });
 
-  allSessions       = Object.values(map).sort((a,b)=>(fechaToISO(b.fecha)+b.hora).localeCompare(fechaToISO(a.fecha)+a.hora));
-  filteredSessions  = [...allSessions];
+  allSessions      = Object.values(map).sort((a,b)=>(fechaToISO(b.fecha)+b.hora).localeCompare(fechaToISO(a.fecha)+a.hora));
+  filteredSessions = [...allSessions];
   renderSessionList();
   updateGlobalStats(filteredSessions);
 }
@@ -291,12 +329,18 @@ async function loadSessions() {
 function renderSessionList() {
   const list = $('session-list');
   if (!filteredSessions.length) { list.innerHTML='<div class="empty-msg">Sin resultados</div>'; return; }
+  const selIds = [...selectedSessions];
   list.innerHTML = filteredSessions.map(s => {
+    const isSelected = selectedSessions.has(s.sesion_id);
+    const selIdx     = selIds.indexOf(s.sesion_id);
+    const selColor   = isSelected ? SESSION_COLORS[selIdx % SESSION_COLORS.length] : '';
     const chips = Object.entries(s.enfs).sort((a,b)=>b[1]-a[1]).slice(0,4)
       .map(([e,n]) => `<span class="enf-chip" style="background:${ENF_COLOR[e]||'#6b7c74'}22;color:${ENF_COLOR[e]||'#6b7c74'};border-color:${ENF_COLOR[e]||'#6b7c74'}55">${ENF_ICON[e]||'⚫'} ${n}</span>`).join('');
+    const borderStyle = isSelected ? `border-color:${selColor};box-shadow:0 0 0 2px ${selColor}44;background:${selColor}11;` : '';
     return `
-      <div class="session-card ${currentSession===s.sesion_id?'active':''}" onclick="selectSession('${s.sesion_id}')">
+      <div class="session-card" style="${borderStyle}" onclick="toggleSession('${s.sesion_id}')">
         <div class="sess-header">
+          ${isSelected ? `<span class="sess-sel-dot" style="background:${selColor}"></span>` : '<span class="sess-sel-dot" style="background:transparent;border:1.5px dashed #ccc"></span>'}
           <span class="sess-fecha">${formatFecha(s.fecha)}</span>
           <span class="sess-total">${s.total} plantas</span>
           <button class="sess-del" title="Eliminar sesión" onclick="event.stopPropagation();confirmDelete('${s.sesion_id}','${esc(s.finca)} Lote ${esc(s.lote)}')">🗑</button>
@@ -308,40 +352,72 @@ function renderSessionList() {
   }).join('');
 }
 
-async function selectSession(sesionId) {
+async function toggleSession(sesionId) {
   timerStop();
-  currentSession = sesionId;
+  if (selectedSessions.has(sesionId)) {
+    selectedSessions.delete(sesionId);
+  } else {
+    selectedSessions.add(sesionId);
+  }
   renderSessionList();
 
-  show('detail-panel'); hide('detail-empty');
-  $('detail-nombre').textContent  = '...';
-  $('detail-empresa').textContent = '';
-  $('detail-fecha').textContent   = '';
-  $('detail-total').textContent   = '';
-  $('detail-enfs').innerHTML      = '<div class="loading-sm">Cargando...</div>';
-  clearMapLayers();
-  timerReset();
+  // Cargar datos de sesiones nuevas
+  const toLoad = [...selectedSessions].filter(id => !sessionData[id]);
+  if (toLoad.length) {
+    showLoading(true);
+    await Promise.all(toLoad.map(id => loadSessionData(id)));
+    showLoading(false);
+  }
 
+  updateDetailPanel();
+  timerShowAll();
+}
+
+async function loadSessionData(sesionId) {
   const [regRes, trackRes] = await Promise.all([
     sb.from('censo_registros').select('*').eq('sesion_id', sesionId).order('hora'),
     sb.from('censo_track').select('lat,lng,ts,acc').eq('sesion_id', sesionId).order('ts')
   ]);
+  sessionData[sesionId] = {
+    registros: regRes.data   || [],
+    track:     trackRes.data || []
+  };
+}
 
-  currentRegistros = regRes.data   || [];
-  currentTrack     = trackRes.data || [];
-  const s = allSessions.find(x => x.sesion_id === sesionId);
-
-  if (s) {
-    $('detail-nombre').textContent  = s.nombre || '—';
-    $('detail-empresa').textContent = `${s.empresa||''} › ${s.finca||''} › Lote ${s.lote||''}`;
-    $('detail-fecha').textContent   = `${formatFecha(s.fecha)} · ${s.hora||''}`;
-    $('detail-total').textContent   = `${currentRegistros.length} plantas · ${currentTrack.length} pts GPS`;
+function updateDetailPanel() {
+  if (selectedSessions.size === 0) {
+    hide('detail-panel'); show('detail-empty');
+    return;
   }
+  show('detail-panel'); hide('detail-empty');
 
-  // Desglose enfermedades
+  let allRegs = [], allTracks = [];
+  [...selectedSessions].forEach(sid => {
+    const d = sessionData[sid];
+    if (!d) return;
+    allRegs   = allRegs.concat(d.registros);
+    allTracks = allTracks.concat(d.track);
+  });
+
+  if (selectedSessions.size === 1) {
+    const sid = [...selectedSessions][0];
+    const s = allSessions.find(x => x.sesion_id === sid);
+    if (s) {
+      $('detail-nombre').textContent  = s.nombre || '—';
+      $('detail-empresa').textContent = `${s.empresa||''} › ${s.finca||''} › Lote ${s.lote||''}`;
+      $('detail-fecha').textContent   = `${formatFecha(s.fecha)} · ${s.hora||''}`;
+    }
+  } else {
+    const sesInfo = [...selectedSessions].map(id => allSessions.find(x => x.sesion_id === id)).filter(Boolean);
+    $('detail-nombre').textContent  = `${selectedSessions.size} sesiones seleccionadas`;
+    $('detail-empresa').textContent = [...new Set(sesInfo.map(s=>`${s.finca} L${s.lote}`))].join(', ');
+    $('detail-fecha').textContent   = '';
+  }
+  $('detail-total').textContent = `${allRegs.length} plantas · ${allTracks.length} pts GPS`;
+
   const counts = {};
-  currentRegistros.forEach(r => { counts[r.enfermedad] = (counts[r.enfermedad]||0)+1; });
-  const total = currentRegistros.length || 1;
+  allRegs.forEach(r => { counts[r.enfermedad] = (counts[r.enfermedad]||0)+1; });
+  const total = allRegs.length || 1;
   $('detail-enfs').innerHTML = Object.entries(counts).sort((a,b)=>b[1]-a[1])
     .map(([e,n]) => `
       <div class="detail-enf-row">
@@ -350,11 +426,6 @@ async function selectSession(sesionId) {
         <div class="detail-enf-count">${n}</div>
         <div class="detail-enf-bar"><div class="detail-enf-fill" style="width:${Math.round(n/total*100)}%;background:${ENF_COLOR[e]||'#6b7c74'}"></div></div>
       </div>`).join('');
-
-  // Inicializar timer (no reproduce, solo prepara)
-  timerInit(currentTrack, currentRegistros);
-  // Mostrar todo directo
-  timerShowAll();
 }
 
 // ── Eliminar sesión ───────────────────────────────────────────
@@ -375,45 +446,73 @@ $('del-ok').addEventListener('click', async () => {
     sb.from('censo_registros').delete().eq('sesion_id', deletedId),
     sb.from('censo_track').delete().eq('sesion_id', deletedId)
   ]);
-  if (currentSession === deletedId) {
-    currentSession = null; clearMapLayers(); timerStop();
-    hide('detail-panel'); show('detail-empty');
-  }
+  selectedSessions.delete(deletedId);
+  delete sessionData[deletedId];
   showLoading(false);
   await loadSessions();
+  updateDetailPanel();
+  if (selectedSessions.size > 0) timerShowAll();
+  else { clearMapLayers(); timerStop(); updateTimerUI(); }
 });
 
 // ── Excel export ──────────────────────────────────────────────
 function exportExcel() {
-  if (!currentRegistros.length) { alert('Seleccione una sesión primero'); return; }
-  const s = allSessions.find(x => x.sesion_id === currentSession);
-  const rows = currentRegistros.map(r => ({
-    '#':          r.local_id || r.id,
-    'Fecha':      r.fecha,
-    'Hora':       r.hora,
-    'Operario':   r.nombre,
-    'Empresa':    r.empresa,
-    'Finca':      r.finca,
-    'Lote':       r.lote,
-    'Enfermedad': r.enfermedad,
-    'Nota':       r.nota||'',
-    'Latitud':    r.lat,
-    'Longitud':   r.lng,
-    'Precisión m':r.accuracy
-  }));
-  const ws  = XLSX.utils.json_to_sheet(rows);
-  const wb  = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Registros');
+  if (selectedSessions.size === 0) { alert('Seleccione al menos una sesión'); return; }
+  const wb = XLSX.utils.book_new();
 
-  // Track sheet
-  if (currentTrack.length) {
-    const trackRows = currentTrack.map(p => ({
-      'Timestamp':p.ts, 'Latitud':p.lat, 'Longitud':p.lng, 'Precisión m':p.acc
-    }));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trackRows), 'Track GPS');
+  // Hoja Registros
+  const allRows = [];
+  [...selectedSessions].forEach(sid => {
+    const data = sessionData[sid];
+    if (!data) return;
+    const s = allSessions.find(x => x.sesion_id === sid);
+    data.registros.forEach(r => {
+      allRows.push({
+        'Sesión':      sid,
+        '#':           r.local_id || r.id,
+        'Fecha':       r.fecha,
+        'Hora':        r.hora,
+        'Operario':    r.nombre,
+        'Empresa':     r.empresa,
+        'Finca':       r.finca,
+        'Lote':        r.lote,
+        'Enfermedad':  r.enfermedad,
+        'Nota':        r.nota || '',
+        'Latitud':     r.lat,
+        'Longitud':    r.lng,
+        'Precisión m': r.accuracy
+      });
+    });
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allRows), 'Registros');
+
+  // Hoja Track GPS
+  const allTrackRows = [];
+  [...selectedSessions].forEach(sid => {
+    const data = sessionData[sid];
+    if (!data || !data.track.length) return;
+    const s = allSessions.find(x => x.sesion_id === sid);
+    data.track.forEach(p => {
+      allTrackRows.push({
+        'Sesión':      sid,
+        'Operario':    s ? s.nombre : '',
+        'Finca':       s ? s.finca  : '',
+        'Lote':        s ? s.lote   : '',
+        'Timestamp':   p.ts,
+        'Latitud':     p.lat,
+        'Longitud':    p.lng,
+        'Precisión m': p.acc
+      });
+    });
+  });
+  if (allTrackRows.length) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allTrackRows), 'Track GPS');
   }
 
-  const fname = s ? `censo_${s.finca}_lote${s.lote}_${s.fecha}.xlsx`.replace(/\s+/g,'_') : 'censo.xlsx';
+  const sesInfo = [...selectedSessions].map(id => allSessions.find(x => x.sesion_id === id)).filter(Boolean);
+  const fname = sesInfo.length === 1
+    ? `censo_${sesInfo[0].finca}_lote${sesInfo[0].lote}_${sesInfo[0].fecha}.xlsx`.replace(/\s+/g,'_')
+    : `censo_${sesInfo.length}sesiones_${new Date().toISOString().slice(0,10)}.xlsx`;
   XLSX.writeFile(wb, fname);
 }
 
@@ -429,34 +528,84 @@ function updateGlobalStats(sessions) {
 }
 
 // ── Resumen ───────────────────────────────────────────────────
-let chartEnf = null, chartFinca = null;
+let chartEnf = null, chartFinca = null, chartEnfPct = null;
 
 async function loadResumen() {
-  if (resumenData) { renderResumen(); return; }
-  $('resumen-content').innerHTML = '<div class="loading-center"><div class="spinner"></div></div>';
+  if (!resumenData) {
+    $('resumen-content').innerHTML = '<div class="loading-center"><div class="spinner"></div></div>';
+    const [regRes, lotesRes] = await Promise.all([
+      sb.from('censo_registros').select('empresa,finca,lote,enfermedad,fecha'),
+      sb.from('lotes').select('empresa,finca,nombre,palmas')
+    ]);
+    resumenData = { registros: regRes.data||[], lotes: lotesRes.data||[] };
+  }
+  renderResumen();
+}
 
-  const [regRes, lotesRes] = await Promise.all([
-    sb.from('censo_registros').select('empresa,finca,lote,enfermedad'),
-    sb.from('lotes').select('empresa,finca,nombre,palmas')
-  ]);
+function populateResumenFilters() {
+  const { registros } = resumenData;
+  const empresas = [...new Set(registros.map(r=>r.empresa).filter(Boolean))].sort();
+  const fincas   = [...new Set(registros.map(r=>r.finca).filter(Boolean))].sort();
+  const lotes    = [...new Set(registros.map(r=>r.lote).filter(Boolean))].sort();
 
-  resumenData = { registros: regRes.data||[], lotes: lotesRes.data||[] };
+  const fill = (id, items, allLabel) => {
+    const el = $(id);
+    if (!el) return;
+    const prev = el.value;
+    el.innerHTML = `<option value="">${allLabel}</option>`;
+    items.forEach(v => { const o = document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); });
+    el.value = prev;
+  };
+  fill('res-filter-empresa', empresas, 'Todas las empresas');
+  fill('res-filter-finca',   fincas,   'Todas las fincas');
+  fill('res-filter-lote',    lotes,    'Todos los lotes');
+}
+
+function applyResumenFilters() {
+  resumenFilters.empresa  = $('res-filter-empresa')   ? $('res-filter-empresa').value   : '';
+  resumenFilters.finca    = $('res-filter-finca')      ? $('res-filter-finca').value     : '';
+  resumenFilters.lote     = $('res-filter-lote')       ? $('res-filter-lote').value      : '';
+  resumenFilters.fechaIni = $('res-filter-fecha-ini')  ? $('res-filter-fecha-ini').value : '';
+  resumenFilters.fechaFin = $('res-filter-fecha-fin')  ? $('res-filter-fecha-fin').value : '';
+  renderResumen();
+}
+
+function limpiarResumenFiltros() {
+  resumenFilters = { empresa:'', finca:'', lote:'', fechaIni:'', fechaFin:'' };
+  ['res-filter-empresa','res-filter-finca','res-filter-lote','res-filter-fecha-ini','res-filter-fecha-fin']
+    .forEach(id => { if ($(id)) $(id).value = ''; });
   renderResumen();
 }
 
 function renderResumen() {
-  const { registros, lotes } = resumenData;
+  const { registros: allReg, lotes } = resumenData;
+  const f = resumenFilters;
 
-  // ── Totales globales ──
-  const totalCasos = registros.length;
-  const totalPalmas = lotes.reduce((s,l)=>s+(l.palmas||0),0);
+  const registros = allReg.filter(r => {
+    if (f.empresa && r.empresa !== f.empresa) return false;
+    if (f.finca   && r.finca   !== f.finca)   return false;
+    if (f.lote    && r.lote    !== f.lote)     return false;
+    if (f.fechaIni && fechaToISO(r.fecha) < f.fechaIni) return false;
+    if (f.fechaFin && fechaToISO(r.fecha) > f.fechaFin) return false;
+    return true;
+  });
 
-  // ── Por enfermedad ──
+  const lotesFiltered = lotes.filter(l => {
+    if (f.empresa && l.empresa !== f.empresa) return false;
+    if (f.finca   && l.finca   !== f.finca)   return false;
+    if (f.lote    && l.nombre  !== f.lote)     return false;
+    return true;
+  });
+
+  const totalCasos  = registros.length;
+  const totalPalmas = lotesFiltered.reduce((s,l)=>s+(l.palmas||0), 0);
+
+  // Por enfermedad global
   const porEnf = {};
   ENFERMEDADES.forEach(e => { porEnf[e]=0; });
-  registros.forEach(r => { if(porEnf[r.enfermedad]!==undefined) porEnf[r.enfermedad]++; else porEnf['Otras']++; });
+  registros.forEach(r => { if (porEnf[r.enfermedad]!==undefined) porEnf[r.enfermedad]++; else porEnf['Otras']++; });
 
-  // ── Por finca/lote ──
+  // Por finca/lote
   const porLote = {};
   registros.forEach(r => {
     const k = `${r.empresa}||${r.finca}||${r.lote}`;
@@ -465,22 +614,29 @@ function renderResumen() {
     porLote[k].enfs[r.enfermedad] = (porLote[k].enfs[r.enfermedad]||0)+1;
   });
 
-  // Joinear con lotes para palmas
   const lotesMap = {};
-  lotes.forEach(l => { lotesMap[`${l.empresa}||${l.finca}||${l.nombre}`]=l.palmas||0; });
+  lotes.forEach(l => { lotesMap[`${l.empresa}||${l.finca}||${l.nombre}`] = l.palmas||0; });
+  const filas = Object.values(porLote).map(row => ({
+    ...row,
+    palmas: lotesMap[`${row.empresa}||${row.finca}||${row.lote}`] || 0
+  })).sort((a,b) => b.total - a.total);
 
-  const filas = Object.values(porLote).map(f => ({
-    ...f,
-    palmas: lotesMap[`${f.empresa}||${f.finca}||${f.lote}`] || 0
-  })).sort((a,b)=>b.total-a.total);
-
-  // ── Render HTML ──
+  // ── HTML ──
   $('resumen-content').innerHTML = `
+    <div class="res-filters">
+      <select id="res-filter-empresa" onchange="applyResumenFilters()"><option value="">Todas las empresas</option></select>
+      <select id="res-filter-finca"   onchange="applyResumenFilters()"><option value="">Todas las fincas</option></select>
+      <select id="res-filter-lote"    onchange="applyResumenFilters()"><option value="">Todos los lotes</option></select>
+      <input type="date" id="res-filter-fecha-ini" title="Desde" onchange="applyResumenFilters()" />
+      <input type="date" id="res-filter-fecha-fin" title="Hasta" onchange="applyResumenFilters()" />
+      <button class="btn-limpiar" onclick="limpiarResumenFiltros()">✕ Limpiar</button>
+    </div>
+
     <div class="res-kpis">
       <div class="res-kpi"><div class="res-kpi-val">${totalCasos}</div><div class="res-kpi-label">Casos totales</div></div>
       <div class="res-kpi"><div class="res-kpi-val">${totalPalmas.toLocaleString('es-CO')}</div><div class="res-kpi-label">Palmas sembradas</div></div>
       <div class="res-kpi"><div class="res-kpi-val">${totalPalmas?((totalCasos/totalPalmas)*100).toFixed(2)+'%':'—'}</div><div class="res-kpi-label">% Afectación global</div></div>
-      <div class="res-kpi"><div class="res-kpi-val">${lotes.length}</div><div class="res-kpi-label">Lotes censados</div></div>
+      <div class="res-kpi"><div class="res-kpi-val">${lotesFiltered.length}</div><div class="res-kpi-label">Lotes censados</div></div>
     </div>
 
     <div class="res-charts-row">
@@ -489,7 +645,13 @@ function renderResumen() {
         <canvas id="chart-enf" height="220"></canvas>
       </div>
       <div class="res-chart-box">
-        <div class="res-section-title">Top 10 fincas por casos</div>
+        <div class="res-section-title">% Infestación por enfermedad</div>
+        <canvas id="chart-enf-pct" height="220"></canvas>
+      </div>
+    </div>
+    <div class="res-charts-row" style="margin-top:0">
+      <div class="res-chart-box" style="flex:1">
+        <div class="res-section-title">Top 10 fincas / lotes por casos</div>
         <canvas id="chart-finca" height="220"></canvas>
       </div>
     </div>
@@ -500,23 +662,28 @@ function renderResumen() {
         <thead>
           <tr>
             <th>Empresa</th><th>Finca</th><th>Lote</th>
-            <th>Palmas</th><th>Casos</th><th>% Afectación</th>
-            ${ENFERMEDADES.map(e=>`<th>${e}</th>`).join('')}
+            <th>Palmas</th><th>Total</th><th>% Total</th>
+            ${ENFERMEDADES.map(e=>`<th>${e}</th><th>% ${e}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
-          ${filas.map(f => {
-            const pct = f.palmas ? ((f.total/f.palmas)*100).toFixed(2) : '—';
-            const pctNum = f.palmas ? f.total/f.palmas : 0;
+          ${filas.map(row => {
+            const pctTotal = row.palmas ? ((row.total/row.palmas)*100).toFixed(2) : '—';
+            const pctNum   = row.palmas ? row.total/row.palmas : 0;
             const pctColor = pctNum>0.05 ? '#e63946' : pctNum>0.02 ? '#f4a261' : '#40916c';
             return `<tr>
-              <td>${esc(f.empresa)}</td>
-              <td>${esc(f.finca)}</td>
-              <td>${esc(f.lote)}</td>
-              <td>${f.palmas.toLocaleString('es-CO')}</td>
-              <td><strong>${f.total}</strong></td>
-              <td><span class="pct-badge" style="background:${pctColor}22;color:${pctColor};border-color:${pctColor}44">${pct}${f.palmas?'%':''}</span></td>
-              ${ENFERMEDADES.map(e=>`<td>${f.enfs[e]||0}</td>`).join('')}
+              <td>${esc(row.empresa)}</td>
+              <td>${esc(row.finca)}</td>
+              <td>${esc(row.lote)}</td>
+              <td>${row.palmas.toLocaleString('es-CO')}</td>
+              <td><strong>${row.total}</strong></td>
+              <td><span class="pct-badge" style="background:${pctColor}22;color:${pctColor};border-color:${pctColor}44">${pctTotal}${row.palmas?'%':''}</span></td>
+              ${ENFERMEDADES.map(e => {
+                const n  = row.enfs[e] || 0;
+                const ep = row.palmas ? ((n/row.palmas)*100).toFixed(2) : '—';
+                const ec = !row.palmas ? '#6b7c74' : (n/row.palmas>0.05?'#e63946':n/row.palmas>0.02?'#f4a261':'#40916c');
+                return `<td>${n}</td><td><span class="pct-badge" style="background:${ec}22;color:${ec};border-color:${ec}44;font-size:.65rem">${ep}${row.palmas?'%':''}</span></td>`;
+              }).join('')}
             </tr>`;
           }).join('')}
         </tbody>
@@ -526,28 +693,50 @@ function renderResumen() {
             <td>${totalPalmas.toLocaleString('es-CO')}</td>
             <td><strong>${totalCasos}</strong></td>
             <td>${totalPalmas?((totalCasos/totalPalmas)*100).toFixed(2)+'%':'—'}</td>
-            ${ENFERMEDADES.map(e=>`<td>${porEnf[e]||0}</td>`).join('')}
+            ${ENFERMEDADES.map(e => {
+              const n  = porEnf[e]||0;
+              const ep = totalPalmas ? ((n/totalPalmas)*100).toFixed(2)+'%' : '—';
+              return `<td>${n}</td><td>${ep}</td>`;
+            }).join('')}
           </tr>
         </tfoot>
       </table>
     </div>`;
 
-  // ── Gráficas Chart.js ──
-  if (chartEnf)   { chartEnf.destroy();   chartEnf   = null; }
-  if (chartFinca) { chartFinca.destroy(); chartFinca = null; }
+  // Poblar filtros y restaurar valores
+  populateResumenFilters();
+  if ($('res-filter-empresa'))   $('res-filter-empresa').value   = resumenFilters.empresa;
+  if ($('res-filter-finca'))     $('res-filter-finca').value     = resumenFilters.finca;
+  if ($('res-filter-lote'))      $('res-filter-lote').value      = resumenFilters.lote;
+  if ($('res-filter-fecha-ini')) $('res-filter-fecha-ini').value = resumenFilters.fechaIni;
+  if ($('res-filter-fecha-fin')) $('res-filter-fecha-fin').value = resumenFilters.fechaFin;
 
-  // Doughnut enfermedades
+  // ── Gráficas ──
+  if (chartEnf)    { chartEnf.destroy();    chartEnf    = null; }
+  if (chartFinca)  { chartFinca.destroy();  chartFinca  = null; }
+  if (chartEnfPct) { chartEnfPct.destroy(); chartEnfPct = null; }
+
   const enfLabels = ENFERMEDADES.filter(e=>porEnf[e]>0);
   const enfVals   = enfLabels.map(e=>porEnf[e]);
   const enfColors = enfLabels.map(e=>ENF_COLOR[e]||'#6b7c74');
+
   chartEnf = new Chart($('chart-enf'), {
     type:'doughnut',
     data:{ labels:enfLabels, datasets:[{ data:enfVals, backgroundColor:enfColors, borderWidth:2, borderColor:'#fff' }] },
     options:{ plugins:{ legend:{ position:'bottom', labels:{ font:{ size:11 } } } }, cutout:'55%' }
   });
 
-  // Bar top fincas
-  const topFincas = filas.slice(0,10);
+  const pctVals = enfLabels.map(e => totalPalmas ? (porEnf[e]/totalPalmas)*100 : 0);
+  chartEnfPct = new Chart($('chart-enf-pct'), {
+    type:'bar',
+    data:{ labels:enfLabels, datasets:[{ data:pctVals, backgroundColor:enfColors, borderRadius:4, label:'% Infestación' }] },
+    options:{
+      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label: ctx => ctx.parsed.y.toFixed(4)+'%' } } },
+      scales:{ y:{ ticks:{ callback: v => v.toFixed(3)+'%' }, grid:{ color:'#eee' } }, x:{ ticks:{ font:{ size:10 } } } }
+    }
+  });
+
+  const topFincas   = filas.slice(0,10);
   const fincaLabels = topFincas.map(f=>`${f.finca} L${f.lote}`);
   const fincaVals   = topFincas.map(f=>f.total);
   const fincaColors = topFincas.map(f=>{

@@ -172,8 +172,8 @@
       transition: border-color .15s, box-shadow .15s;
     }
     .session-card:hover { border-color: var(--verde-cla); box-shadow: var(--sombra); }
-    .session-card.active { border-color: var(--verde-med); background: var(--verde-bg); }
-    .sess-header { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; }
+    .sess-header { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+    .sess-sel-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; transition:background .15s; }
     .sess-fecha  { font-size: .75rem; font-weight: 700; color: var(--verde); flex: 1; }
     .sess-total  { font-size: .68rem; font-weight: 700; background: var(--verde); color: var(--blanco); padding: 2px 7px; border-radius: 20px; }
     .sess-del    { background: none; border: none; cursor: pointer; font-size: .9rem; padding: 0 2px; opacity: .5; transition: opacity .15s; }
@@ -269,6 +269,26 @@
 
     /* ── RESUMEN tab ───────────────── */
     #tab-resumen { flex-direction: column; overflow-y: auto; background: var(--gris-cla); }
+    .res-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 14px 20px 0;
+      align-items: center;
+    }
+    .res-filters select,
+    .res-filters input[type=date] {
+      padding: 6px 9px;
+      border: 1.5px solid var(--borde);
+      border-radius: 7px;
+      font-size: .8rem;
+      outline: none;
+      background: var(--blanco);
+      transition: border-color .15s;
+      min-width: 140px;
+    }
+    .res-filters select:focus,
+    .res-filters input:focus { border-color: var(--verde-med); }
     .res-kpis { display: flex; gap: 14px; padding: 18px 20px 0; }
     .res-kpi {
       flex: 1;
@@ -521,7 +541,7 @@
           <div class="legend-title">Leyenda</div>
           <div class="legend-row"><div class="legend-dot" style="background:#1b4332"></div>Inicio recorrido</div>
           <div class="legend-row"><div class="legend-dot" style="background:#e63946"></div>Fin recorrido</div>
-          <div class="legend-row"><div class="legend-dot" style="background:#40916c"></div>Punto GPS track</div>
+          <div class="legend-row"><div style="width:18px;height:3px;background:#40916c;border-radius:2px;flex-shrink:0"></div>Track GPS (línea)</div>
           <div class="legend-row"><div class="legend-dot" style="background:#e63946"></div>Anillo Rojo</div>
           <div class="legend-row"><div class="legend-dot" style="background:#f4a261"></div>PC</div>
           <div class="legend-row"><div class="legend-dot" style="background:#9b2226"></div>Marchitez Letal</div>
