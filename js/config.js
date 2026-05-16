@@ -1,0 +1,2 @@
+const SUPABASE_URL  = 'https://wmcnvfoongcwoxoudvtr.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndtY252Zm9vbmdjd294b3VkdnRyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0OTU0MzAsImV4cCI6MjA4OTA3MTQzMH0.eOQJIGlGbrq9-7-t6IXr9eEYYrvZYhVsv9kHzFRr4vo';

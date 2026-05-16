@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Visor de Enfermedades — Grupo Palmicultor</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    /* ── Variables ─────────────────────────────────── */
+    :root {
+      --verde:      #2d6a4f;
+      --verde-med:  #40916c;
+      --verde-cla:  #52b788;
+      --verde-bg:   #d8f3dc;
+      --gris:       #6b7c74;
+      --gris-cla:   #f4f6f5;
+      --borde:      #dde5e0;
+      --texto:      #1b2e25;
+      --blanco:     #ffffff;
+      --danger:     #e63946;
+      --sombra:     0 2px 10px rgba(0,0,0,.08);
+    }
+
+    /* ── Reset ─────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--gris-cla);
+      color: var(--texto);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .hidden { display: none !important; }
+
+    /* ── Login ─────────────────────────────────────── */
+    #login-screen {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #1b4332 0%, #40916c 100%);
+    }
+    .login-card {
+      background: var(--blanco);
+      border-radius: 16px;
+      padding: 40px 36px;
+      width: 100%;
+      max-width: 380px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    }
+    .login-logo {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .login-logo img {
+      height: 70px;
+      object-fit: contain;
+    }
+    .login-title {
+      text-align: center;
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--verde);
+      margin-bottom: 6px;
+    }
+    .login-sub {
+      text-align: center;
+      font-size: .8rem;
+      color: var(--gris);
+      margin-bottom: 28px;
+    }
+    .login-field { margin-bottom: 16px; }
+    .login-field label {
+      display: block;
+      font-size: .75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--gris);
+      margin-bottom: 6px;
+    }
+    .login-field input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid var(--borde);
+      border-radius: 8px;
+      font-size: .95rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .login-field input:focus { border-color: var(--verde-med); }
+    .login-error {
+      color: var(--danger);
+      font-size: .8rem;
+      min-height: 1.2em;
+      margin-bottom: 12px;
+    }
+    .login-btn {
+      width: 100%;
+      padding: 12px;
+      background: var(--verde);
+      color: var(--blanco);
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .login-btn:hover  { background: var(--verde-med); }
+    .login-btn:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* ── App layout ────────────────────────────────── */
+    #app {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Header */
+    .header {
+      background: var(--verde);
+      color: var(--blanco);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 20px;
+      height: 52px;
+      flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(0,0,0,.2);
+    }
+    .header img { height: 32px; }
+    .header-title { font-size: 1rem; font-weight: 700; letter-spacing: .02em; }
+    .header-sub { font-size: .72rem; opacity: .8; margin-left: 2px; }
+    .header-spacer { flex: 1; }
+    .header-user { font-size: .78rem; opacity: .85; }
+    .btn-logout {
+      background: rgba(255,255,255,.15);
+      border: none;
+      color: var(--blanco);
+      padding: 5px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .78rem;
+      transition: background .15s;
+    }
+    .btn-logout:hover { background: rgba(255,255,255,.25); }
+
+    /* Stats bar */
+    .stats-bar {
+      background: var(--blanco);
+      border-bottom: 1px solid var(--borde);
+      display: flex;
+      gap: 0;
+      flex-shrink: 0;
+    }
+    .stat-item {
+      flex: 1;
+      padding: 8px 20px;
+      border-right: 1px solid var(--borde);
+    }
+    .stat-item:last-child { border-right: none; }
+    .stat-label {
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--gris);
+      font-weight: 600;
+    }
+    .stat-val {
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: var(--verde);
+      line-height: 1.2;
+    }
+
+    /* Main content */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Left panel — filtros + lista */
+    .left-panel {
+      width: 300px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--blanco);
+      border-right: 1px solid var(--borde);
+      overflow: hidden;
+    }
+    .filter-block {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--borde);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .filter-block label {
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--gris);
+      font-weight: 600;
+    }
+    .filter-block select,
+    .filter-block input[type=date],
+    .filter-block input[type=text] {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1.5px solid var(--borde);
+      border-radius: 7px;
+      font-size: .82rem;
+      outline: none;
+      background: var(--gris-cla);
+      transition: border-color .15s;
+    }
+    .filter-block select:focus,
+    .filter-block input:focus { border-color: var(--verde-med); background: var(--blanco); }
+    .filter-dates { display: flex; gap: 6px; }
+    .filter-dates input { flex: 1; }
+    .btn-limpiar {
+      padding: 6px 10px;
+      background: none;
+      border: 1.5px solid var(--borde);
+      border-radius: 7px;
+      font-size: .78rem;
+      color: var(--gris);
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+      align-self: flex-start;
+    }
+    .btn-limpiar:hover { border-color: var(--verde-med); color: var(--verde); }
+
+    /* Session list */
+    .session-list-wrap {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 10px;
+    }
+    .session-card {
+      background: var(--gris-cla);
+      border: 1.5px solid var(--borde);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .session-card:hover {
+      border-color: var(--verde-cla);
+      box-shadow: var(--sombra);
+    }
+    .session-card.active {
+      border-color: var(--verde-med);
+      background: var(--verde-bg);
+      box-shadow: 0 2px 8px rgba(64,145,108,.18);
+    }
+    .sess-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .sess-fecha {
+      font-size: .78rem;
+      font-weight: 700;
+      color: var(--verde);
+    }
+    .sess-total {
+      font-size: .72rem;
+      font-weight: 700;
+      background: var(--verde);
+      color: var(--blanco);
+      padding: 2px 8px;
+      border-radius: 20px;
+    }
+    .sess-nombre {
+      font-size: .85rem;
+      font-weight: 600;
+      color: var(--texto);
+      margin-bottom: 2px;
+    }
+    .sess-lugar {
+      font-size: .72rem;
+      color: var(--gris);
+      margin-bottom: 6px;
+    }
+    .sess-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .enf-chip {
+      font-size: .68rem;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 20px;
+      border: 1px solid;
+    }
+    .empty-msg {
+      text-align: center;
+      color: var(--gris);
+      font-size: .85rem;
+      padding: 40px 20px;
+    }
+
+    /* Center — map */
+    .map-wrap {
+      flex: 1;
+      position: relative;
+    }
+    #map {
+      position: absolute;
+      inset: 0;
+    }
+
+    /* Right panel — detalle sesión */
+    .right-panel {
+      width: 280px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--blanco);
+      border-left: 1px solid var(--borde);
+      overflow: hidden;
+    }
+    .detail-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--borde);
+    }
+    .detail-nombre {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--texto);
+      margin-bottom: 2px;
+    }
+    .detail-empresa {
+      font-size: .72rem;
+      color: var(--gris);
+      margin-bottom: 2px;
+    }
+    .detail-fecha {
+      font-size: .75rem;
+      color: var(--verde-med);
+      font-weight: 600;
+    }
+    .detail-total {
+      font-size: .78rem;
+      color: var(--gris);
+      margin-top: 4px;
+    }
+    .detail-enfs-wrap {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 16px;
+    }
+    .detail-section-label {
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--gris);
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .detail-enf-row {
+      display: grid;
+      grid-template-columns: 10px 1fr auto 80px;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 9px;
+    }
+    .detail-enf-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .detail-enf-name {
+      font-size: .78rem;
+      color: var(--texto);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .detail-enf-count {
+      font-size: .78rem;
+      font-weight: 700;
+      color: var(--verde);
+    }
+    .detail-enf-bar {
+      height: 6px;
+      background: var(--borde);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .detail-enf-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width .3s;
+    }
+    .detail-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      color: var(--gris);
+      text-align: center;
+      padding: 30px 20px;
+    }
+    .detail-placeholder-icon { font-size: 2.5rem; margin-bottom: 10px; opacity: .4; }
+    .detail-placeholder-txt { font-size: .82rem; opacity: .7; }
+    .loading-sm { color: var(--gris); font-size: .82rem; padding: 20px 0; text-align: center; }
+
+    /* Leyenda de colores */
+    .legend {
+      padding: 12px 16px;
+      border-top: 1px solid var(--borde);
+    }
+    .legend-title {
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--gris);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .legend-items {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: .72rem;
+      color: var(--texto);
+    }
+    .legend-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(255,255,255,.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 4px solid var(--borde);
+      border-top-color: var(--verde);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- ═══ LOADING ═══ -->
+<div id="loading-overlay" class="hidden">
+  <div class="spinner"></div>
+</div>
+
+<!-- ═══ LOGIN ═══ -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="https://raw.githubusercontent.com/Franciscoromero36/App-enfermedades/main/LOGO%20GRUPO%20PALMICULTOR.png"
+           alt="Grupo Palmicultor" onerror="this.style.display='none'" />
+    </div>
+    <div class="login-title">Visor de Enfermedades</div>
+    <div class="login-sub">Grupo Palmicultor — Área de Sanidad</div>
+
+    <div class="login-field">
+      <label>Correo electrónico</label>
+      <input type="email" id="login-email" placeholder="usuario@sanidad.com" autocomplete="email" />
+    </div>
+    <div class="login-field">
+      <label>Contraseña</label>
+      <input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+    <div class="login-error" id="login-error"></div>
+    <button class="login-btn" id="login-btn">Ingresar</button>
+  </div>
+</div>
+
+<!-- ═══ APP ═══ -->
+<div id="app" class="hidden">
+
+  <!-- Header -->
+  <div class="header">
+    <img src="https://raw.githubusercontent.com/Franciscoromero36/App-enfermedades/main/LOGO%20GRUPO%20PALMICULTOR.png"
+         alt="Logo" onerror="this.style.display='none'" />
+    <div>
+      <div class="header-title">Visor de Enfermedades</div>
+      <div class="header-sub">Grupo Palmicultor — Palma de Aceite</div>
+    </div>
+    <div class="header-spacer"></div>
+    <button class="btn-logout" id="btn-logout">Cerrar sesión</button>
+  </div>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <div class="stat-label">Sesiones</div>
+      <div class="stat-val" id="total-sesiones">—</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Plantas registradas</div>
+      <div class="stat-val" id="total-plantas">—</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Enfermedad más frecuente</div>
+      <div class="stat-val" style="font-size:.95rem" id="top-enfermedad">—</div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Panel izquierdo: filtros + sesiones -->
+    <div class="left-panel">
+      <div class="filter-block">
+        <div>
+          <label>Empresa</label>
+          <select id="filter-empresa">
+            <option value="">Todas las empresas</option>
+          </select>
+        </div>
+        <div>
+          <label>Rango de fechas</label>
+          <div class="filter-dates">
+            <input type="date" id="filter-fecha-ini" title="Desde" />
+            <input type="date" id="filter-fecha-fin" title="Hasta" />
+          </div>
+        </div>
+        <div>
+          <label>Buscar operario / finca / lote</label>
+          <input type="text" id="filter-texto" placeholder="Buscar..." />
+        </div>
+        <button class="btn-limpiar" id="btn-limpiar">✕ Limpiar filtros</button>
+      </div>
+      <div class="session-list-wrap" id="session-list">
+        <div class="empty-msg">Cargando sesiones...</div>
+      </div>
+    </div>
+
+    <!-- Mapa -->
+    <div class="map-wrap">
+      <div id="map"></div>
+    </div>
+
+    <!-- Panel derecho: detalle de sesión -->
+    <div class="right-panel">
+      <div id="detail-panel" class="hidden" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+        <div class="detail-header">
+          <div class="detail-nombre" id="detail-nombre">—</div>
+          <div class="detail-empresa" id="detail-empresa"></div>
+          <div class="detail-fecha" id="detail-fecha"></div>
+          <div class="detail-total" id="detail-total"></div>
+        </div>
+        <div class="detail-enfs-wrap">
+          <div class="detail-section-label">Enfermedades registradas</div>
+          <div id="detail-enfs"></div>
+        </div>
+      </div>
+      <div id="detail-empty" style="display:flex;flex-direction:column;flex:1;align-items:center;justify-content:center;padding:30px 20px;color:#6b7c74;text-align:center;">
+        <div style="font-size:2.5rem;margin-bottom:10px;opacity:.35">🗺️</div>
+        <div style="font-size:.82rem;opacity:.7">Seleccione una sesión<br>para ver el mapa y detalles</div>
+      </div>
+
+      <!-- Leyenda -->
+      <div class="legend">
+        <div class="legend-title">Leyenda</div>
+        <div class="legend-items">
+          <div class="legend-row"><div class="legend-dot" style="background:#1b4332"></div> Inicio recorrido</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#e63946"></div> Fin recorrido</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#e63946"></div> Anillo Rojo</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#f4a261"></div> PC</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#9b2226"></div> Marchitez Letal</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#8b5e3c"></div> Pudrición Seca</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#4361ee"></div> Pudrición Húmeda</div>
+          <div class="legend-row"><div class="legend-dot" style="background:#6b7c74"></div> Otras</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="js/supabase.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/visor.js"></script>
+</body>
+</html>
