@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   Visor de Enfermedades v3 — Grupo Palmicultor
+   Visor de Enfermedades v3.1 — Grupo Palmicultor
    ============================================================ */
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -17,28 +17,26 @@ const ENF_ICON = {
   'Anillo Rojo':'🔴','PC':'🟠','Marchitez Letal':'🟤',
   'Pudrición Seca':'🟫','Pudrición Húmeda':'🔵','Otras':'⚫'
 };
-const ENFERMEDADES = Object.keys(ENF_COLOR);
+const ENFERMEDADES  = Object.keys(ENF_COLOR);
 const SESSION_COLORS = ['#40916c','#e63946','#4361ee','#f4a261','#9b2226','#06d6a0','#fb8500','#8338ec','#023e8a','#8b5e3c'];
 
 // ── Estado ────────────────────────────────────────────────────
 let MAP = null;
-let mapLayers = { polylines:[], markers:[], starts:[], ends:[] };
+let mapLayers = { trackDots:[], markers:[] };
 let selectedSessions = new Set();
-let sessionData = {};       // sesion_id → { registros:[], track:[] }
-let allSessions = [];
+let sessionData      = {};    // sesion_id → { registros:[], track:[] }
+let allSessions      = [];
 let filteredSessions = [];
 
 // Timer
 let timerInterval = null;
-let timerIdx = 0;
-let timerSpeed = 5;
-let timerPlaying = false;
-let timerEvents = [];
-let animPolylines = {};     // sid → L.polyline (en animación)
-let animPolyPoints = {};    // sid → [[lat,lng],...]
+let timerIdx      = 0;
+let timerSpeed    = 5;
+let timerPlaying  = false;
+let timerEvents   = [];
 
 // Resumen
-let resumenData = null;
+let resumenData    = null;
 let resumenFilters = { empresa:'', finca:'', lote:'', fechaIni:'', fechaFin:'' };
 
 // ── DOM ───────────────────────────────────────────────────────
@@ -60,19 +58,12 @@ async function login() {
   if (error) { $('login-error').textContent = 'Credenciales incorrectas.'; return; }
   showApp();
 }
-
-async function logout() {
-  timerStop();
-  await sb.auth.signOut();
-  showLogin();
-}
+async function logout() { timerStop(); await sb.auth.signOut(); showLogin(); }
 
 function showLogin() {
   hide('app'); show('login-screen');
-  $('login-email').value = '';
-  $('login-pass').value  = '';
+  $('login-email').value = ''; $('login-pass').value = '';
 }
-
 async function showApp() {
   hide('login-screen'); show('app');
   initMap();
@@ -92,7 +83,7 @@ function switchTab(tabId) {
 // ── Mapa ──────────────────────────────────────────────────────
 function initMap() {
   if (MAP) return;
-  MAP = L.map('map', { zoomControl: true }).setView([4.5, -74.0], 7);
+  MAP = L.map('map', { zoomControl:true }).setView([4.5, -74.0], 7);
   const streets   = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     { attribution:'© OpenStreetMap', maxZoom:20 });
   const satellite = L.tileLayer(
@@ -103,43 +94,28 @@ function initMap() {
 }
 
 function clearMapLayers() {
-  mapLayers.polylines.forEach(l => MAP.removeLayer(l)); mapLayers.polylines = [];
+  mapLayers.trackDots.forEach(d => MAP.removeLayer(d)); mapLayers.trackDots = [];
   mapLayers.markers.forEach(m => MAP.removeLayer(m));   mapLayers.markers   = [];
-  mapLayers.starts.forEach(m => MAP.removeLayer(m));    mapLayers.starts    = [];
-  mapLayers.ends.forEach(m => MAP.removeLayer(m));      mapLayers.ends      = [];
-  animPolylines = {};
-  animPolyPoints = {};
 }
 
-function getSessionColor(sid) {
-  const ids = [...selectedSessions];
-  const idx = ids.indexOf(sid);
-  return SESSION_COLORS[idx >= 0 ? idx % SESSION_COLORS.length : 0];
-}
-
-function addTrackPolyline(track, color) {
-  const pts = track.filter(p => p.lat && p.lng).map(p => [p.lat, p.lng]);
-  if (pts.length < 2) return null;
-  const poly = L.polyline(pts, { color, weight:3, opacity:0.85 }).addTo(MAP);
-  mapLayers.polylines.push(poly);
-  return poly;
-}
-
-function addStartEndMarkers(track) {
-  const valid = track.filter(p => p.lat && p.lng);
-  if (!valid.length) return;
-  const first = valid[0];
-  const last  = valid[valid.length - 1];
-  const sm = L.circleMarker([first.lat, first.lng], {
-    radius:7, fillColor:'#1b4332', color:'#fff', weight:2, fillOpacity:1
-  }).bindPopup('Inicio de recorrido').addTo(MAP);
-  mapLayers.starts.push(sm);
-  if (valid.length > 1) {
-    const em = L.circleMarker([last.lat, last.lng], {
-      radius:7, fillColor:'#e63946', color:'#fff', weight:2, fillOpacity:1
+// Track: puntos individuales — verde pequeño, inicio/fin destacados
+function addTrackDot(p, isFirst, isLast) {
+  if (!p.lat || !p.lng) return null;
+  let dot;
+  if (isFirst) {
+    dot = L.circleMarker([p.lat, p.lng], {
+      radius:8, fillColor:'#1b4332', color:'#fff', weight:2, fillOpacity:1
+    }).bindPopup('Inicio de recorrido').addTo(MAP);
+  } else if (isLast) {
+    dot = L.circleMarker([p.lat, p.lng], {
+      radius:8, fillColor:'#e63946', color:'#fff', weight:2, fillOpacity:1
     }).bindPopup('Fin de recorrido').addTo(MAP);
-    mapLayers.ends.push(em);
+  } else {
+    dot = L.circleMarker([p.lat, p.lng], {
+      radius:3, fillColor:'#40916c', color:'#40916c', weight:1, fillOpacity:0.7
+    }).bindPopup(`Track · ${p.ts ? p.ts.slice(11,19) : ''} · ±${p.acc||'?'}m`).addTo(MAP);
   }
+  return dot;
 }
 
 function addDiseaseMarker(r) {
@@ -157,13 +133,14 @@ function drawAllOnMap() {
   [...selectedSessions].forEach(sid => {
     const data = sessionData[sid];
     if (!data) return;
-    const color = getSessionColor(sid);
-    addTrackPolyline(data.track, color);
-    addStartEndMarkers(data.track);
-    data.track.filter(p => p.lat && p.lng).forEach(p => bounds.push([p.lat, p.lng]));
+    const valid = data.track.filter(p => p.lat && p.lng);
+    valid.forEach((p, i) => {
+      const dot = addTrackDot(p, i === 0, i === valid.length - 1);
+      if (dot) { mapLayers.trackDots.push(dot); bounds.push([p.lat, p.lng]); }
+    });
     data.registros.forEach(r => {
       const m = addDiseaseMarker(r);
-      if (m && r.lat && r.lng) bounds.push([r.lat, r.lng]);
+      if (m && r.lat && r.lng) { mapLayers.markers.push(m); bounds.push([r.lat, r.lng]); }
     });
   });
   if (bounds.length) MAP.fitBounds(bounds, { padding:[30,30] });
@@ -175,8 +152,10 @@ function buildTimerEvents() {
   [...selectedSessions].forEach(sid => {
     const data = sessionData[sid];
     if (!data) return;
-    data.track.forEach((p, i) => {
-      if (p.lat && p.lng) evts.push({ type:'track', data:p, idx:i, total:data.track.length, sid });
+    // Usar solo puntos con coordenadas válidas para que idx/total sean correctos
+    const validTrack = data.track.filter(p => p.lat && p.lng);
+    validTrack.forEach((p, i) => {
+      evts.push({ type:'track', data:p, isFirst:i===0, isLast:i===validTrack.length-1, sid });
     });
     data.registros.forEach(r => {
       if (r.lat && r.lng) evts.push({ type:'reg', data:r, sid });
@@ -190,31 +169,23 @@ function buildTimerEvents() {
   return evts;
 }
 
-function timerInit() {
-  timerStop();
-  clearMapLayers();
-  timerEvents = buildTimerEvents();
-  timerIdx    = 0;
-  updateTimerUI();
-}
-
 function timerPlay() {
   if (timerPlaying) return;
+  // Si ya llegó al final o nunca empezó, reiniciar desde cero
+  if (timerIdx >= timerEvents.length) {
+    clearMapLayers();
+    timerEvents = buildTimerEvents();
+    timerIdx = 0;
+  }
+  if (!timerEvents.length) return;
   timerPlaying = true;
   $('btn-play').textContent = '⏸ Pausar';
   timerInterval = setInterval(() => {
-    const steps = timerSpeed;
-    for (let i = 0; i < steps && timerIdx < timerEvents.length; i++, timerIdx++) {
+    for (let i = 0; i < timerSpeed && timerIdx < timerEvents.length; i++, timerIdx++) {
       const ev = timerEvents[timerIdx];
       if (ev.type === 'track') {
-        if (!animPolylines[ev.sid]) {
-          const color = getSessionColor(ev.sid);
-          animPolylines[ev.sid]  = L.polyline([], { color, weight:3, opacity:0.85 }).addTo(MAP);
-          mapLayers.polylines.push(animPolylines[ev.sid]);
-          animPolyPoints[ev.sid] = [];
-        }
-        animPolyPoints[ev.sid].push([ev.data.lat, ev.data.lng]);
-        animPolylines[ev.sid].setLatLngs(animPolyPoints[ev.sid]);
+        const dot = addTrackDot(ev.data, ev.isFirst, ev.isLast);
+        if (dot) mapLayers.trackDots.push(dot);
       } else {
         const m = addDiseaseMarker(ev.data);
         if (m) mapLayers.markers.push(m);
@@ -237,18 +208,10 @@ function timerStop() {
   if ($('btn-play')) $('btn-play').textContent = '▶ Reproducir';
 }
 
-function timerReset() {
-  timerStop();
-  clearMapLayers();
-  timerEvents = buildTimerEvents();
-  timerIdx = 0;
-  updateTimerUI();
-}
-
 function timerShowAll() {
   timerStop();
   timerEvents = buildTimerEvents();
-  timerIdx    = timerEvents.length;
+  timerIdx    = timerEvents.length;   // marcar como "al final"
   drawAllOnMap();
   updateTimerUI();
 }
@@ -261,7 +224,7 @@ function updateTimerUI() {
   const trackDone = timerEvents.slice(0, timerIdx).filter(e => e.type==='track').length;
   const regDone   = timerEvents.slice(0, timerIdx).filter(e => e.type==='reg').length;
   setTxt('timer-track', trackDone + ' pts GPS');
-  setTxt('timer-regs',  regDone + ' registros');
+  setTxt('timer-regs',  regDone   + ' registros');
   if (timerIdx > 0) {
     const last = timerEvents[timerIdx - 1];
     const ts   = last.type==='track' ? last.data.ts : (last.data.timestamp||'');
@@ -278,10 +241,7 @@ async function loadFilters() {
   const empresas = [...new Set(data.map(r=>r.empresa).filter(Boolean))].sort();
   const sel = $('filter-empresa');
   sel.innerHTML = '<option value="">Todas las empresas</option>';
-  empresas.forEach(e => {
-    const o = document.createElement('option');
-    o.value = e; o.textContent = e; sel.appendChild(o);
-  });
+  empresas.forEach(e => { const o = document.createElement('option'); o.value=e; o.textContent=e; sel.appendChild(o); });
 }
 
 function applyFilters() {
@@ -319,7 +279,6 @@ async function loadSessions() {
     map[r.sesion_id].total++;
     map[r.sesion_id].enfs[r.enfermedad] = (map[r.sesion_id].enfs[r.enfermedad]||0)+1;
   });
-
   allSessions      = Object.values(map).sort((a,b)=>(fechaToISO(b.fecha)+b.hora).localeCompare(fechaToISO(a.fecha)+a.hora));
   filteredSessions = [...allSessions];
   renderSessionList();
@@ -340,7 +299,7 @@ function renderSessionList() {
     return `
       <div class="session-card" style="${borderStyle}" onclick="toggleSession('${s.sesion_id}')">
         <div class="sess-header">
-          ${isSelected ? `<span class="sess-sel-dot" style="background:${selColor}"></span>` : '<span class="sess-sel-dot" style="background:transparent;border:1.5px dashed #ccc"></span>'}
+          <span class="sess-sel-dot" style="background:${isSelected?selColor:'transparent'};border:1.5px ${isSelected?'solid':'dashed'} ${isSelected?selColor:'#ccc'}"></span>
           <span class="sess-fecha">${formatFecha(s.fecha)}</span>
           <span class="sess-total">${s.total} plantas</span>
           <button class="sess-del" title="Eliminar sesión" onclick="event.stopPropagation();confirmDelete('${s.sesion_id}','${esc(s.finca)} Lote ${esc(s.lote)}')">🗑</button>
@@ -360,15 +319,12 @@ async function toggleSession(sesionId) {
     selectedSessions.add(sesionId);
   }
   renderSessionList();
-
-  // Cargar datos de sesiones nuevas
   const toLoad = [...selectedSessions].filter(id => !sessionData[id]);
   if (toLoad.length) {
     showLoading(true);
     await Promise.all(toLoad.map(id => loadSessionData(id)));
     showLoading(false);
   }
-
   updateDetailPanel();
   timerShowAll();
 }
@@ -385,63 +341,49 @@ async function loadSessionData(sesionId) {
 }
 
 function updateDetailPanel() {
-  if (selectedSessions.size === 0) {
-    hide('detail-panel'); show('detail-empty');
-    return;
-  }
+  if (selectedSessions.size === 0) { hide('detail-panel'); show('detail-empty'); return; }
   show('detail-panel'); hide('detail-empty');
-
   let allRegs = [], allTracks = [];
   [...selectedSessions].forEach(sid => {
-    const d = sessionData[sid];
-    if (!d) return;
+    const d = sessionData[sid]; if (!d) return;
     allRegs   = allRegs.concat(d.registros);
     allTracks = allTracks.concat(d.track);
   });
-
   if (selectedSessions.size === 1) {
-    const sid = [...selectedSessions][0];
-    const s = allSessions.find(x => x.sesion_id === sid);
+    const s = allSessions.find(x => x.sesion_id === [...selectedSessions][0]);
     if (s) {
       $('detail-nombre').textContent  = s.nombre || '—';
       $('detail-empresa').textContent = `${s.empresa||''} › ${s.finca||''} › Lote ${s.lote||''}`;
       $('detail-fecha').textContent   = `${formatFecha(s.fecha)} · ${s.hora||''}`;
     }
   } else {
-    const sesInfo = [...selectedSessions].map(id => allSessions.find(x => x.sesion_id === id)).filter(Boolean);
+    const ses = [...selectedSessions].map(id=>allSessions.find(x=>x.sesion_id===id)).filter(Boolean);
     $('detail-nombre').textContent  = `${selectedSessions.size} sesiones seleccionadas`;
-    $('detail-empresa').textContent = [...new Set(sesInfo.map(s=>`${s.finca} L${s.lote}`))].join(', ');
+    $('detail-empresa').textContent = [...new Set(ses.map(s=>`${s.finca} L${s.lote}`))].join(', ');
     $('detail-fecha').textContent   = '';
   }
   $('detail-total').textContent = `${allRegs.length} plantas · ${allTracks.length} pts GPS`;
-
   const counts = {};
   allRegs.forEach(r => { counts[r.enfermedad] = (counts[r.enfermedad]||0)+1; });
-  const total = allRegs.length || 1;
+  const tot = allRegs.length || 1;
   $('detail-enfs').innerHTML = Object.entries(counts).sort((a,b)=>b[1]-a[1])
     .map(([e,n]) => `
       <div class="detail-enf-row">
         <div class="detail-enf-dot" style="background:${ENF_COLOR[e]||'#6b7c74'}"></div>
         <div class="detail-enf-name">${esc(e)}</div>
         <div class="detail-enf-count">${n}</div>
-        <div class="detail-enf-bar"><div class="detail-enf-fill" style="width:${Math.round(n/total*100)}%;background:${ENF_COLOR[e]||'#6b7c74'}"></div></div>
+        <div class="detail-enf-bar"><div class="detail-enf-fill" style="width:${Math.round(n/tot*100)}%;background:${ENF_COLOR[e]||'#6b7c74'}"></div></div>
       </div>`).join('');
 }
 
 // ── Eliminar sesión ───────────────────────────────────────────
 let _delSesion = null;
-function confirmDelete(sesionId, label) {
-  _delSesion = sesionId;
-  $('del-label').textContent = label;
-  show('modal-delete');
-}
-$('del-cancel').addEventListener('click', () => { hide('modal-delete'); _delSesion = null; });
+function confirmDelete(sesionId, label) { _delSesion=sesionId; $('del-label').textContent=label; show('modal-delete'); }
+$('del-cancel').addEventListener('click', () => { hide('modal-delete'); _delSesion=null; });
 $('del-ok').addEventListener('click', async () => {
   if (!_delSesion) return;
-  hide('modal-delete');
-  showLoading(true);
-  const deletedId = _delSesion;
-  _delSesion = null;
+  hide('modal-delete'); showLoading(true);
+  const deletedId = _delSesion; _delSesion = null;
   await Promise.all([
     sb.from('censo_registros').delete().eq('sesion_id', deletedId),
     sb.from('censo_track').delete().eq('sesion_id', deletedId)
@@ -451,84 +393,48 @@ $('del-ok').addEventListener('click', async () => {
   showLoading(false);
   await loadSessions();
   updateDetailPanel();
-  if (selectedSessions.size > 0) timerShowAll();
-  else { clearMapLayers(); timerStop(); updateTimerUI(); }
+  if (selectedSessions.size > 0) timerShowAll(); else { clearMapLayers(); timerStop(); updateTimerUI(); }
 });
 
 // ── Excel export ──────────────────────────────────────────────
 function exportExcel() {
   if (selectedSessions.size === 0) { alert('Seleccione al menos una sesión'); return; }
   const wb = XLSX.utils.book_new();
-
-  // Hoja Registros
-  const allRows = [];
+  const allRows = [], allTrackRows = [];
   [...selectedSessions].forEach(sid => {
-    const data = sessionData[sid];
-    if (!data) return;
+    const data = sessionData[sid]; if (!data) return;
     const s = allSessions.find(x => x.sesion_id === sid);
-    data.registros.forEach(r => {
-      allRows.push({
-        'Sesión':      sid,
-        '#':           r.local_id || r.id,
-        'Fecha':       r.fecha,
-        'Hora':        r.hora,
-        'Operario':    r.nombre,
-        'Empresa':     r.empresa,
-        'Finca':       r.finca,
-        'Lote':        r.lote,
-        'Enfermedad':  r.enfermedad,
-        'Nota':        r.nota || '',
-        'Latitud':     r.lat,
-        'Longitud':    r.lng,
-        'Precisión m': r.accuracy
-      });
-    });
+    data.registros.forEach(r => allRows.push({
+      'Sesión':r.sesion_id,'#':r.local_id||r.id,'Fecha':r.fecha,'Hora':r.hora,
+      'Operario':r.nombre,'Empresa':r.empresa,'Finca':r.finca,'Lote':r.lote,
+      'Enfermedad':r.enfermedad,'Nota':r.nota||'','Latitud':r.lat,'Longitud':r.lng,'Precisión m':r.accuracy
+    }));
+    data.track.forEach(p => allTrackRows.push({
+      'Sesión':sid,'Operario':s?s.nombre:'','Finca':s?s.finca:'','Lote':s?s.lote:'',
+      'Timestamp':p.ts,'Latitud':p.lat,'Longitud':p.lng,'Precisión m':p.acc
+    }));
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allRows), 'Registros');
-
-  // Hoja Track GPS
-  const allTrackRows = [];
-  [...selectedSessions].forEach(sid => {
-    const data = sessionData[sid];
-    if (!data || !data.track.length) return;
-    const s = allSessions.find(x => x.sesion_id === sid);
-    data.track.forEach(p => {
-      allTrackRows.push({
-        'Sesión':      sid,
-        'Operario':    s ? s.nombre : '',
-        'Finca':       s ? s.finca  : '',
-        'Lote':        s ? s.lote   : '',
-        'Timestamp':   p.ts,
-        'Latitud':     p.lat,
-        'Longitud':    p.lng,
-        'Precisión m': p.acc
-      });
-    });
-  });
-  if (allTrackRows.length) {
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allTrackRows), 'Track GPS');
-  }
-
-  const sesInfo = [...selectedSessions].map(id => allSessions.find(x => x.sesion_id === id)).filter(Boolean);
-  const fname = sesInfo.length === 1
-    ? `censo_${sesInfo[0].finca}_lote${sesInfo[0].lote}_${sesInfo[0].fecha}.xlsx`.replace(/\s+/g,'_')
-    : `censo_${sesInfo.length}sesiones_${new Date().toISOString().slice(0,10)}.xlsx`;
+  if (allTrackRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allTrackRows), 'Track GPS');
+  const ses = [...selectedSessions].map(id=>allSessions.find(x=>x.sesion_id===id)).filter(Boolean);
+  const fname = ses.length===1
+    ? `censo_${ses[0].finca}_lote${ses[0].lote}_${ses[0].fecha}.xlsx`.replace(/\s+/g,'_')
+    : `censo_${ses.length}sesiones_${new Date().toISOString().slice(0,10)}.xlsx`;
   XLSX.writeFile(wb, fname);
 }
 
 // ── Stats globales ────────────────────────────────────────────
 function updateGlobalStats(sessions) {
   setTxt('total-sesiones', sessions.length);
-  const total = sessions.reduce((s,x)=>s+x.total, 0);
-  setTxt('total-plantas', total);
+  setTxt('total-plantas', sessions.reduce((s,x)=>s+x.total,0));
   const enfs = {};
-  sessions.forEach(s => Object.entries(s.enfs).forEach(([e,n]) => { enfs[e]=(enfs[e]||0)+n; }));
+  sessions.forEach(s=>Object.entries(s.enfs).forEach(([e,n])=>{enfs[e]=(enfs[e]||0)+n;}));
   const top = Object.entries(enfs).sort((a,b)=>b[1]-a[1])[0];
-  setTxt('top-enfermedad', top ? `${ENF_ICON[top[0]]||''} ${top[0]}` : '—');
+  setTxt('top-enfermedad', top?`${ENF_ICON[top[0]]||''} ${top[0]}`:'—');
 }
 
 // ── Resumen ───────────────────────────────────────────────────
-let chartEnf = null, chartFinca = null, chartEnfPct = null;
+let chartEnf=null, chartFinca=null, chartEnfPct=null;
 
 async function loadResumen() {
   if (!resumenData) {
@@ -537,48 +443,73 @@ async function loadResumen() {
       sb.from('censo_registros').select('empresa,finca,lote,enfermedad,fecha'),
       sb.from('lotes').select('empresa,finca,nombre,palmas')
     ]);
-    resumenData = { registros: regRes.data||[], lotes: lotesRes.data||[] };
+    resumenData = { registros:regRes.data||[], lotes:lotesRes.data||[] };
   }
+  renderResumen();
+}
+
+// ── Filtros en cascada del resumen ────────────────────────────
+function resEmpresaChange() {
+  resumenFilters.empresa = $('res-filter-empresa').value;
+  resumenFilters.finca   = '';
+  resumenFilters.lote    = '';
+  renderResumen();
+}
+function resFincaChange() {
+  resumenFilters.finca = $('res-filter-finca').value;
+  resumenFilters.lote  = '';
+  renderResumen();
+}
+function resLoteChange() {
+  resumenFilters.lote = $('res-filter-lote').value;
+  renderResumen();
+}
+function resFechaChange() {
+  resumenFilters.fechaIni = $('res-filter-fecha-ini') ? $('res-filter-fecha-ini').value : '';
+  resumenFilters.fechaFin = $('res-filter-fecha-fin') ? $('res-filter-fecha-fin').value : '';
+  renderResumen();
+}
+function limpiarResumenFiltros() {
+  resumenFilters = { empresa:'', finca:'', lote:'', fechaIni:'', fechaFin:'' };
   renderResumen();
 }
 
 function populateResumenFilters() {
   const { registros } = resumenData;
+  const f = resumenFilters;
+
+  // Empresa: todos los valores disponibles
   const empresas = [...new Set(registros.map(r=>r.empresa).filter(Boolean))].sort();
-  const fincas   = [...new Set(registros.map(r=>r.finca).filter(Boolean))].sort();
-  const lotes    = [...new Set(registros.map(r=>r.lote).filter(Boolean))].sort();
 
-  const fill = (id, items, allLabel) => {
-    const el = $(id);
-    if (!el) return;
-    const prev = el.value;
-    el.innerHTML = `<option value="">${allLabel}</option>`;
-    items.forEach(v => { const o = document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); });
-    el.value = prev;
+  // Finca: solo las que existen para la empresa seleccionada
+  const fincas = [...new Set(
+    registros.filter(r => !f.empresa || r.empresa === f.empresa)
+             .map(r=>r.finca).filter(Boolean)
+  )].sort();
+
+  // Lote: solo los que existen para empresa + finca seleccionadas
+  const lotes = [...new Set(
+    registros.filter(r =>
+      (!f.empresa || r.empresa === f.empresa) &&
+      (!f.finca   || r.finca   === f.finca)
+    ).map(r=>r.lote).filter(Boolean)
+  )].sort();
+
+  const fill = (id, items, label, val) => {
+    const el = $(id); if (!el) return;
+    el.innerHTML = `<option value="">${label}</option>`;
+    items.forEach(v => { const o=document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); });
+    el.value = val;
   };
-  fill('res-filter-empresa', empresas, 'Todas las empresas');
-  fill('res-filter-finca',   fincas,   'Todas las fincas');
-  fill('res-filter-lote',    lotes,    'Todos los lotes');
-}
-
-function applyResumenFilters() {
-  resumenFilters.empresa  = $('res-filter-empresa')   ? $('res-filter-empresa').value   : '';
-  resumenFilters.finca    = $('res-filter-finca')      ? $('res-filter-finca').value     : '';
-  resumenFilters.lote     = $('res-filter-lote')       ? $('res-filter-lote').value      : '';
-  resumenFilters.fechaIni = $('res-filter-fecha-ini')  ? $('res-filter-fecha-ini').value : '';
-  resumenFilters.fechaFin = $('res-filter-fecha-fin')  ? $('res-filter-fecha-fin').value : '';
-  renderResumen();
-}
-
-function limpiarResumenFiltros() {
-  resumenFilters = { empresa:'', finca:'', lote:'', fechaIni:'', fechaFin:'' };
-  ['res-filter-empresa','res-filter-finca','res-filter-lote','res-filter-fecha-ini','res-filter-fecha-fin']
-    .forEach(id => { if ($(id)) $(id).value = ''; });
-  renderResumen();
+  fill('res-filter-empresa', empresas, 'Todas las empresas', f.empresa);
+  fill('res-filter-finca',   fincas,   'Todas las fincas',   f.finca);
+  fill('res-filter-lote',    lotes,    'Todos los lotes',    f.lote);
+  if ($('res-filter-fecha-ini')) $('res-filter-fecha-ini').value = f.fechaIni;
+  if ($('res-filter-fecha-fin')) $('res-filter-fecha-fin').value = f.fechaFin;
 }
 
 function renderResumen() {
-  const { registros: allReg, lotes } = resumenData;
+  const { registros:allReg, lotes } = resumenData;
   const f = resumenFilters;
 
   const registros = allReg.filter(r => {
@@ -589,7 +520,6 @@ function renderResumen() {
     if (f.fechaFin && fechaToISO(r.fecha) > f.fechaFin) return false;
     return true;
   });
-
   const lotesFiltered = lotes.filter(l => {
     if (f.empresa && l.empresa !== f.empresa) return false;
     if (f.finca   && l.finca   !== f.finca)   return false;
@@ -600,12 +530,10 @@ function renderResumen() {
   const totalCasos  = registros.length;
   const totalPalmas = lotesFiltered.reduce((s,l)=>s+(l.palmas||0), 0);
 
-  // Por enfermedad global
   const porEnf = {};
-  ENFERMEDADES.forEach(e => { porEnf[e]=0; });
+  ENFERMEDADES.forEach(e=>{porEnf[e]=0;});
   registros.forEach(r => { if (porEnf[r.enfermedad]!==undefined) porEnf[r.enfermedad]++; else porEnf['Otras']++; });
 
-  // Por finca/lote
   const porLote = {};
   registros.forEach(r => {
     const k = `${r.empresa}||${r.finca}||${r.lote}`;
@@ -613,22 +541,19 @@ function renderResumen() {
     porLote[k].total++;
     porLote[k].enfs[r.enfermedad] = (porLote[k].enfs[r.enfermedad]||0)+1;
   });
-
   const lotesMap = {};
   lotes.forEach(l => { lotesMap[`${l.empresa}||${l.finca}||${l.nombre}`] = l.palmas||0; });
-  const filas = Object.values(porLote).map(row => ({
-    ...row,
-    palmas: lotesMap[`${row.empresa}||${row.finca}||${row.lote}`] || 0
-  })).sort((a,b) => b.total - a.total);
+  const filas = Object.values(porLote)
+    .map(row => ({ ...row, palmas: lotesMap[`${row.empresa}||${row.finca}||${row.lote}`]||0 }))
+    .sort((a,b) => b.total-a.total);
 
-  // ── HTML ──
   $('resumen-content').innerHTML = `
     <div class="res-filters">
-      <select id="res-filter-empresa" onchange="applyResumenFilters()"><option value="">Todas las empresas</option></select>
-      <select id="res-filter-finca"   onchange="applyResumenFilters()"><option value="">Todas las fincas</option></select>
-      <select id="res-filter-lote"    onchange="applyResumenFilters()"><option value="">Todos los lotes</option></select>
-      <input type="date" id="res-filter-fecha-ini" title="Desde" onchange="applyResumenFilters()" />
-      <input type="date" id="res-filter-fecha-fin" title="Hasta" onchange="applyResumenFilters()" />
+      <select id="res-filter-empresa" onchange="resEmpresaChange()"><option value="">Todas las empresas</option></select>
+      <select id="res-filter-finca"   onchange="resFincaChange()"><option value="">Todas las fincas</option></select>
+      <select id="res-filter-lote"    onchange="resLoteChange()"><option value="">Todos los lotes</option></select>
+      <input type="date" id="res-filter-fecha-ini" title="Desde" onchange="resFechaChange()" />
+      <input type="date" id="res-filter-fecha-fin" title="Hasta" onchange="resFechaChange()" />
       <button class="btn-limpiar" onclick="limpiarResumenFiltros()">✕ Limpiar</button>
     </div>
 
@@ -668,20 +593,18 @@ function renderResumen() {
         </thead>
         <tbody>
           ${filas.map(row => {
-            const pctTotal = row.palmas ? ((row.total/row.palmas)*100).toFixed(2) : '—';
-            const pctNum   = row.palmas ? row.total/row.palmas : 0;
-            const pctColor = pctNum>0.05 ? '#e63946' : pctNum>0.02 ? '#f4a261' : '#40916c';
+            const pctTot = row.palmas ? ((row.total/row.palmas)*100).toFixed(2) : '—';
+            const pctNum = row.palmas ? row.total/row.palmas : 0;
+            const pc     = pctNum>0.05?'#e63946':pctNum>0.02?'#f4a261':'#40916c';
             return `<tr>
-              <td>${esc(row.empresa)}</td>
-              <td>${esc(row.finca)}</td>
-              <td>${esc(row.lote)}</td>
+              <td>${esc(row.empresa)}</td><td>${esc(row.finca)}</td><td>${esc(row.lote)}</td>
               <td>${row.palmas.toLocaleString('es-CO')}</td>
               <td><strong>${row.total}</strong></td>
-              <td><span class="pct-badge" style="background:${pctColor}22;color:${pctColor};border-color:${pctColor}44">${pctTotal}${row.palmas?'%':''}</span></td>
+              <td><span class="pct-badge" style="background:${pc}22;color:${pc};border-color:${pc}44">${pctTot}${row.palmas?'%':''}</span></td>
               ${ENFERMEDADES.map(e => {
-                const n  = row.enfs[e] || 0;
+                const n  = row.enfs[e]||0;
                 const ep = row.palmas ? ((n/row.palmas)*100).toFixed(2) : '—';
-                const ec = !row.palmas ? '#6b7c74' : (n/row.palmas>0.05?'#e63946':n/row.palmas>0.02?'#f4a261':'#40916c');
+                const ec = !row.palmas?'#6b7c74':n/row.palmas>0.05?'#e63946':n/row.palmas>0.02?'#f4a261':'#40916c';
                 return `<td>${n}</td><td><span class="pct-badge" style="background:${ec}22;color:${ec};border-color:${ec}44;font-size:.65rem">${ep}${row.palmas?'%':''}</span></td>`;
               }).join('')}
             </tr>`;
@@ -693,25 +616,19 @@ function renderResumen() {
             <td>${totalPalmas.toLocaleString('es-CO')}</td>
             <td><strong>${totalCasos}</strong></td>
             <td>${totalPalmas?((totalCasos/totalPalmas)*100).toFixed(2)+'%':'—'}</td>
-            ${ENFERMEDADES.map(e => {
-              const n  = porEnf[e]||0;
-              const ep = totalPalmas ? ((n/totalPalmas)*100).toFixed(2)+'%' : '—';
-              return `<td>${n}</td><td>${ep}</td>`;
+            ${ENFERMEDADES.map(e=>{
+              const n=porEnf[e]||0;
+              return `<td>${n}</td><td>${totalPalmas?((n/totalPalmas)*100).toFixed(2)+'%':'—'}</td>`;
             }).join('')}
           </tr>
         </tfoot>
       </table>
     </div>`;
 
-  // Poblar filtros y restaurar valores
+  // Poblar filtros en cascada y restaurar valores seleccionados
   populateResumenFilters();
-  if ($('res-filter-empresa'))   $('res-filter-empresa').value   = resumenFilters.empresa;
-  if ($('res-filter-finca'))     $('res-filter-finca').value     = resumenFilters.finca;
-  if ($('res-filter-lote'))      $('res-filter-lote').value      = resumenFilters.lote;
-  if ($('res-filter-fecha-ini')) $('res-filter-fecha-ini').value = resumenFilters.fechaIni;
-  if ($('res-filter-fecha-fin')) $('res-filter-fecha-fin').value = resumenFilters.fechaFin;
 
-  // ── Gráficas ──
+  // Destruir gráficas anteriores
   if (chartEnf)    { chartEnf.destroy();    chartEnf    = null; }
   if (chartFinca)  { chartFinca.destroy();  chartFinca  = null; }
   if (chartEnfPct) { chartEnfPct.destroy(); chartEnfPct = null; }
@@ -726,31 +643,24 @@ function renderResumen() {
     options:{ plugins:{ legend:{ position:'bottom', labels:{ font:{ size:11 } } } }, cutout:'55%' }
   });
 
-  const pctVals = enfLabels.map(e => totalPalmas ? (porEnf[e]/totalPalmas)*100 : 0);
   chartEnfPct = new Chart($('chart-enf-pct'), {
     type:'bar',
-    data:{ labels:enfLabels, datasets:[{ data:pctVals, backgroundColor:enfColors, borderRadius:4, label:'% Infestación' }] },
+    data:{ labels:enfLabels, datasets:[{ data:enfLabels.map(e=>totalPalmas?(porEnf[e]/totalPalmas)*100:0), backgroundColor:enfColors, borderRadius:4 }] },
     options:{
-      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label: ctx => ctx.parsed.y.toFixed(4)+'%' } } },
-      scales:{ y:{ ticks:{ callback: v => v.toFixed(3)+'%' }, grid:{ color:'#eee' } }, x:{ ticks:{ font:{ size:10 } } } }
+      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:ctx=>ctx.parsed.y.toFixed(4)+'%' } } },
+      scales:{ y:{ ticks:{ callback:v=>v.toFixed(3)+'%' }, grid:{ color:'#eee' } }, x:{ ticks:{ font:{ size:10 } } } }
     }
   });
 
-  const topFincas   = filas.slice(0,10);
-  const fincaLabels = topFincas.map(f=>`${f.finca} L${f.lote}`);
-  const fincaVals   = topFincas.map(f=>f.total);
-  const fincaColors = topFincas.map(f=>{
-    const pct = f.palmas ? f.total/f.palmas : 0;
-    return pct>0.05 ? '#e63946' : pct>0.02 ? '#f4a261' : '#40916c';
-  });
+  const top10    = filas.slice(0,10);
   chartFinca = new Chart($('chart-finca'), {
     type:'bar',
-    data:{ labels:fincaLabels, datasets:[{ data:fincaVals, backgroundColor:fincaColors, borderRadius:4 }] },
-    options:{
-      indexAxis:'y',
-      plugins:{ legend:{ display:false } },
-      scales:{ x:{ grid:{ color:'#eee' } }, y:{ ticks:{ font:{ size:10 } } } }
-    }
+    data:{
+      labels: top10.map(f=>`${f.finca} L${f.lote}`),
+      datasets:[{ data:top10.map(f=>f.total), borderRadius:4,
+        backgroundColor: top10.map(f=>{ const p=f.palmas?f.total/f.palmas:0; return p>0.05?'#e63946':p>0.02?'#f4a261':'#40916c'; }) }]
+    },
+    options:{ indexAxis:'y', plugins:{ legend:{ display:false } }, scales:{ x:{ grid:{ color:'#eee' } }, y:{ ticks:{ font:{ size:10 } } } } }
   });
 }
 
@@ -758,17 +668,15 @@ function renderResumen() {
 function fechaToISO(f) {
   if (!f) return '';
   if (f.includes('-')) return f;
-  const [d, m, y] = f.split('/');
+  const [d,m,y] = f.split('/');
   return `${y}-${(m||'').padStart(2,'0')}-${(d||'').padStart(2,'0')}`;
 }
-
 function formatFecha(f) {
   if (!f) return '—';
   const iso = fechaToISO(f);
-  const [y, m, d] = iso.split('-');
-  return d && m && y ? `${d}/${m}/${y}` : f;
+  const [y,m,d] = iso.split('-');
+  return d&&m&&y ? `${d}/${m}/${y}` : f;
 }
-
 function showLoading(on) { on ? show('loading-overlay') : hide('loading-overlay'); }
 
 // ── Init ──────────────────────────────────────────────────────
@@ -788,8 +696,8 @@ function showLoading(on) { on ? show('loading-overlay') : hide('loading-overlay'
     applyFilters();
   });
   $('btn-play').addEventListener('click',    () => timerPlaying ? timerPause() : timerPlay());
-  $('btn-reset').addEventListener('click',   () => { timerReset(); timerShowAll(); });
-  $('timer-speed').addEventListener('input', e => { timerSpeed = +e.target.value; $('speed-label').textContent = e.target.value+'x'; });
+  $('btn-reset').addEventListener('click',   () => timerShowAll());
+  $('timer-speed').addEventListener('input', e => { timerSpeed=+e.target.value; $('speed-label').textContent=e.target.value+'x'; });
   $('btn-export').addEventListener('click',  exportExcel);
   document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 })();
